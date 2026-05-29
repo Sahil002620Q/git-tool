@@ -111,6 +111,15 @@ def main():
             # reload config so ignore list changes apply immediately
             config = load_config()
             ignore_set = set(config.get('ignore_list', []))
+        elif choice == '3':
+            new_username = input("Enter your GitHub username: ").strip()
+            if not new_username:
+                input("Username cannot be empty. Press Enter to return...")
+                continue
+            config['username'] = new_username
+            save_config(config)
+            # keep ignore_set in sync for immediate next scan
+            ignore_set = set(config.get('ignore_list', []))
         elif choice == '4':
             break
 
