@@ -17,7 +17,7 @@ Auto-follow users who are likely to follow back, bulk unfollow those who won't, 
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/git-tool-cli.git
+git clone https://github.com/Sahil002620Q/git-tool.git
 cd git-tool-cli
 
 # 2. Create and activate a virtual environment
