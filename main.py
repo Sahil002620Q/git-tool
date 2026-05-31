@@ -113,55 +113,83 @@ def auto_follow_smart(config):
         input("  Press Enter to return ...")
         return
 
+    import random
+
     username   = config["username"]
     ignore_set = set(config.get("ignore_list", []))
 
-    # ── How many to follow ──────────────────────────────────
+    # How many to follow
     batch = ask_int("  How many accounts to follow in this session? [default 10]: ",
                     default=10, minimum=1)
 
-    print("\n  Step 1/4 - Fetching your current following & followers ...")
-    my_following  = get_data(username, "following", get_token())
-    my_followers  = get_data(username, "followers", get_token())
+    # ── Derived limits — keeps scan time proportional to batch ──
+    # Source accounts to scan: batch x 3, clamped between 5 and 20
+    max_sources    = max(5, min(batch * 3, 20))
+    # Max candidates to evaluate: batch x 12, minimum 50
+    max_candidates = max(50, batch * 12)
+    # Stop scoring once this many good candidates are found
+    target_scored  = batch * 2   # small buffer for ranking
 
-    print("  Step 2/4 - Building candidate pool from your followers' following lists ...")
+    print(f"\n  Step 1/4 - Fetching your current following & followers ...")
+    my_following = get_data(username, "following", get_token())
+    my_followers = get_data(username, "followers", get_token())
+
+    # ── Step 2: Build candidate pool (capped) ───────────────────
+    # Shuffle so we don't always scan the same source accounts
+    source_accounts = list(my_followers)
+    random.shuffle(source_accounts)
+    source_accounts = source_accounts[:max_sources]
+
+    print(f"  Step 2/4 - Scanning {len(source_accounts)} source account(s) for candidates ...")
     candidate_set = set()
-    checked = 0
-    for follower_login in list(my_followers)[:50]:   # cap source scan at 50 followers
-        their_following = get_following_of(follower_login, get_token(), max_pages=3)
+    for i, follower_login in enumerate(source_accounts, 1):
+        their_following = get_following_of(follower_login, get_token(), max_pages=2)
         candidate_set.update(their_following)
-        checked += 1
-        print(f"    Scanned {checked} source accounts, {len(candidate_set)} raw candidates …",
-              end="\r")
+        print(f"    [{i}/{len(source_accounts)}] Scanned {follower_login:<25}  "
+              f"{len(candidate_set)} raw candidates", end="\r")
 
     print()  # newline after \r
 
-    # remove already-following, ignored, self
+    # Remove already-following, ignored, self
     candidate_set -= my_following
     candidate_set -= ignore_set
     candidate_set.discard(username)
 
-    print(f"  Step 3/4 - Scoring {len(candidate_set)} candidates (active in 7 days + ratio) ...")
+    if not candidate_set:
+        print("\n  No new candidates found. Try running again later.")
+        input("\n  Press Enter to return ...")
+        return
 
-    scored = []
+    # ── Randomly sample down to max_candidates before scoring ───
+    candidate_list = list(candidate_set)
+    if len(candidate_list) > max_candidates:
+        random.shuffle(candidate_list)
+        candidate_list = candidate_list[:max_candidates]
+        print(f"  (Pool trimmed to {max_candidates} random candidates for speed)")
+
+    total = len(candidate_list)
+    print(f"  Step 3/4 - Scoring up to {total} candidate(s) "
+          f"(stops early once {target_scored} good ones are found) ...")
+
+    # ── Step 3: Score with early exit ───────────────────────────
+    scored    = []
     processed = 0
-    total = len(candidate_set)
 
-    for login in list(candidate_set):
+    for login in candidate_list:
         processed += 1
-        print(f"    [{processed}/{total}] Evaluating {login:<30}", end="\r")
+        print(f"    [{processed}/{total}] Evaluating {login:<28}  "
+              f"found {len(scored)}/{target_scored} good", end="\r")
 
         info = get_user_info(login, get_token())
         if not info:
             continue
 
-        # Hard filter: ratio must pass
+        # Hard filter 1: ratio (no extra API call)
         if not is_likely_to_follow_back(info):
             continue
 
+        # Hard filter 2: active in last 7 days (1 extra API call)
         events = get_user_events(login, get_token(), limit=10)
-
-        # Hard filter: must be active within 7 days
         if not is_active_recently(events, days=7):
             continue
 
@@ -169,19 +197,25 @@ def auto_follow_smart(config):
         if sc >= SCORE_MIN:
             scored.append((sc, login, info, reasons))
 
-    print()  # newline after \r
+        # Early exit once we have enough good candidates
+        if len(scored) >= target_scored:
+            print(f"\n  Found {len(scored)} good candidates - stopping early "
+                  f"(checked {processed}/{total}).")
+            break
 
     if not scored:
-        print("\n  No suitable candidates found this time.")
-        print("  Tip: Try again later or grow your follower base first.")
-        input("\n  Press Enter to return …")
+        print(f"\n\n  No suitable candidates found after checking {processed} accounts.")
+        print("  Tips:")
+        print("    - Grow your follower base so more candidates appear")
+        print("    - Try again later; activity status changes daily")
+        input("\n  Press Enter to return ...")
         return
 
-    # Sort by score descending, then take top `batch`
+    # Sort by score desc, keep top batch
     scored.sort(key=lambda x: x[0], reverse=True)
     to_follow = scored[:batch]
 
-    # ── Preview table ────────────────────────────────────────
+    # ── Step 4: Preview & confirm ────────────────────────────────
     clear_screen()
     print(f"=== AUTO-FOLLOW PREVIEW  ({len(to_follow)} candidates) ===\n")
     rows = []
@@ -199,10 +233,10 @@ def auto_follow_smart(config):
     confirm = input(f"  Follow these {len(to_follow)} accounts? [y/N]: ").strip().lower()
     if confirm != "y":
         print("  Cancelled.")
-        input("\n  Press Enter to return …")
+        input("\n  Press Enter to return ...")
         return
 
-    # ── Execute follows ──────────────────────────────────────
+    # Execute follows
     print()
     ok = 0
     failed = []
@@ -210,11 +244,12 @@ def auto_follow_smart(config):
         success = follow_user(login, get_token())
         if success:
             ok += 1
-            print(f"  ✓ Followed  {login}")
+            print(f"  + Followed  {login}")
         else:
             failed.append(login)
-            print(f"  ✗ Failed    {login}")
+            print(f"  x Failed    {login}")
         time.sleep(FOLLOW_DELAY)
+
 
     print(f"\n  Done — followed {ok}/{len(to_follow)} accounts.")
     if failed:
